@@ -27,7 +27,7 @@
 
 #define SDA_PIN D2
 #define SCL_PIN D1
-#define TOUCH_PIN D5
+#define TOUCH_PIN D7
 
 Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
@@ -40,7 +40,7 @@ String wifiPass    = "123456789";
 
 String apiKey      = "0cccca913e209caca4c7d0fa7e5c109d";
 
-String city        = "Ekm";
+String city        = "Ernakulam";
 String countryCode = "IN";
 
 String tzString    = "IST-5:30";
@@ -478,27 +478,50 @@ void drawClock() {
 
 void drawWeatherPage() {
 
-  display.setFont(&FreeSansBold9pt7b);
+  // Small font
+  display.setFont(&FreeSans9pt7b);
 
-  display.setCursor(0,15);
-
+  // City
+  display.setCursor(2,12);
   display.print(city);
 
+  // Icon
   drawWeatherIcon(weatherMain,96,0);
 
-  display.setFont(&FreeSansBold18pt7b);
+  // Temperature
+  char tempStr[10];
 
-  display.setCursor(0,48);
+  sprintf(tempStr, "%dC", (int)temperature);
 
-  display.print((int)temperature);
+  int16_t x1, y1;
+  uint16_t w, h;
 
-  display.print("C");
+  display.getTextBounds(
+    tempStr,
+    0,
+    0,
+    &x1,
+    &y1,
+    &w,
+    &h
+  );
 
+  int x = (128 - w) / 2;
+
+  display.setCursor(x,34);
+  display.print(tempStr);
+
+  // Smaller bottom text
   display.setFont(NULL);
 
-  display.setCursor(0,60);
+  // Limit long text
+  String shortDesc = weatherDesc;
 
-  display.print(weatherDesc);
+  if (shortDesc.length() > 14)
+    shortDesc = shortDesc.substring(0,14);
+
+  display.setCursor(8,54);
+  display.print(shortDesc);
 }
 
 // ==================================================
