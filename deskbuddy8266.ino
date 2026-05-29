@@ -1,21 +1,20 @@
-
 // ==================================================
-// DESKBUDDY ESP8266 VERSION
-// FULLY MODIFIED FOR NODEMCU ESP8266
+// DESKBUDDY ESP8266 FINAL VERSION
+// NODEMCU ESP8266 + SH1106 OLED
 // ==================================================
 
 #include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
+#include <WiFiManager.h>
 #include <ESP8266HTTPClient.h>
 #include <ArduinoJson.h>
+
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
+
 #include <time.h>
 #include <math.h>
 
-#include <Fonts/FreeSansBold18pt7b.h>
-#include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
 
 // ==================================================
@@ -29,10 +28,15 @@
 #define SCL_PIN D1
 #define TOUCH_PIN D7
 
-Adafruit_SH1106G display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+Adafruit_SH1106G display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  -1
+);
 
 // ==================================================
-// WIFI + WEATHER CONFIG
+// WIFI + WEATHER
 // ==================================================
 
 String wifiSsid    = "AG";
@@ -51,43 +55,37 @@ const char* ntpServer = "pool.ntp.org";
 // WEB SERVER
 // ==================================================
 
-ESP8266WebServer configServer(80);
+// ESP8266WebServer configServer(80);
 
-bool inConfigMode = false;
+// bool inConfigMode = false;
 
-#define CONFIG_AP_SSID "DeskBuddy-Setup"
-#define CONFIG_AP_PASS "12345678"
+// #define CONFIG_AP_SSID "DeskBuddy-Setup"
+// #define CONFIG_AP_PASS "12345678"
 
 // ==================================================
 // WEATHER DATA
 // ==================================================
 
 float temperature = 0;
-float feelsLike = 0;
-
-int humidity = 0;
-
 String weatherMain = "Clear";
 String weatherDesc = "Loading";
 
-struct ForecastDay {
-  String dayName;
-  int temp;
-  String iconType;
-};
-
-ForecastDay fcast[3];
-
 // ==================================================
-// UI
+// UI VARIABLES
 // ==================================================
 
 int currentPage = 0;
 
 unsigned long lastWeatherUpdate = 0;
-unsigned long lastPageSwitch = 0;
 
-const unsigned long PAGE_INTERVAL = 8000;
+bool lastTouchState = LOW;
+unsigned long lastTouchTime = 0;
+
+bool sleeping = false;
+
+unsigned long lastInteraction = 0;
+
+const unsigned long SLEEP_TIME = 30000;
 
 // ==================================================
 // EYE SYSTEM
@@ -98,70 +96,42 @@ struct Eye {
   float x, y;
   float w, h;
 
-  float targetX, targetY;
-  float targetW, targetH;
-
-  float velX, velY;
-  float velW, velH;
+  float targetH;
 
   float pupilX, pupilY;
   float targetPupilX, targetPupilY;
 
-  float pVelX, pVelY;
-
-  float k = 0.12;
-  float d = 0.60;
-
-  float pk = 0.08;
-  float pd = 0.50;
-
-  bool blinking;
-
-  unsigned long lastBlink;
   unsigned long nextBlinkTime;
 
   void init(float _x,float _y,float _w,float _h){
 
-    x = targetX = _x;
-    y = targetY = _y;
+    x = _x;
+    y = _y;
 
-    w = targetW = _w;
-    h = targetH = _h;
+    w = _w;
+    h = _h;
 
-    pupilX = targetPupilX = 0;
-    pupilY = targetPupilY = 0;
+    targetH = _h;
 
-    nextBlinkTime = millis() + random(1000,4000);
+    pupilX = 0;
+    pupilY = 0;
+
+    targetPupilX = 0;
+    targetPupilY = 0;
+
+    nextBlinkTime =
+      millis() + random(2000,5000);
   }
 
   void update() {
 
-    float ax = (targetX - x) * k;
-    float ay = (targetY - y) * k;
+    h += (targetH - h) * 0.2;
 
-    float aw = (targetW - w) * k;
-    float ah = (targetH - h) * k;
+    pupilX +=
+      (targetPupilX - pupilX) * 0.1;
 
-    velX = (velX + ax) * d;
-    velY = (velY + ay) * d;
-
-    velW = (velW + aw) * d;
-    velH = (velH + ah) * d;
-
-    x += velX;
-    y += velY;
-
-    w += velW;
-    h += velH;
-
-    float pax = (targetPupilX - pupilX) * pk;
-    float pay = (targetPupilY - pupilY) * pk;
-
-    pVelX = (pVelX + pax) * pd;
-    pVelY = (pVelY + pay) * pd;
-
-    pupilX += pVelX;
-    pupilY += pVelY;
+    pupilY +=
+      (targetPupilY - pupilY) * 0.1;
   }
 };
 
@@ -169,7 +139,7 @@ Eye leftEye;
 Eye rightEye;
 
 // ==================================================
-// SIMPLE WEATHER ICONS
+// WEATHER ICONS
 // ==================================================
 
 void drawWeatherIcon(String w, int x, int y) {
@@ -190,130 +160,21 @@ void drawWeatherIcon(String w, int x, int y) {
 
     display.fillCircle(x+6,y+8,5,SH110X_WHITE);
     display.fillCircle(x+12,y+8,5,SH110X_WHITE);
+
     display.fillRect(x+4,y+8,10,6,SH110X_WHITE);
   }
 }
 
 // ==================================================
-// CONFIG PAGE
-// ==================================================
-
-void handleConfigRoot() {
-
-  String html = R"rawliteral(
-
-<!DOCTYPE html>
-<html>
-
-<head>
-
-<meta name="viewport" content="width=device-width, initial-scale=1">
-
-<style>
-
-body{
-background:#111;
-color:white;
-font-family:sans-serif;
-padding:20px;
-}
-
-input{
-width:100%;
-padding:12px;
-margin-top:10px;
-}
-
-button{
-width:100%;
-padding:14px;
-margin-top:20px;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<h2>DeskBuddy Setup</h2>
-
-<form action="/save" method="POST">
-
-<input name="ssid" placeholder="WiFi Name">
-
-<input name="pass" placeholder="WiFi Password">
-
-<input name="city" placeholder="City">
-
-<button type="submit">SAVE</button>
-
-</form>
-
-</body>
-</html>
-
-)rawliteral";
-
-  configServer.send(200,"text/html",html);
-}
-
-void handleConfigSave() {
-
-  wifiSsid = configServer.arg("ssid");
-  wifiPass = configServer.arg("pass");
-
-  city = configServer.arg("city");
-
-  configServer.send(
-    200,
-    "text/html",
-    "<h2>Saved. Restarting...</h2>"
-  );
-
-  delay(2000);
-
-  ESP.restart();
-}
-
-void startConfigPortal() {
-
-  inConfigMode = true;
-
-  WiFi.mode(WIFI_AP_STA);
-
-  WiFi.softAP(CONFIG_AP_SSID, CONFIG_AP_PASS);
-
-  configServer.on("/", handleConfigRoot);
-
-  configServer.on("/save", HTTP_POST, handleConfigSave);
-
-  configServer.begin();
-
-  display.clearDisplay();
-
-  display.setCursor(0,10);
-  display.println("CONFIG MODE");
-
-  display.println();
-  display.println("Connect WiFi:");
-
-  display.println(CONFIG_AP_SSID);
-
-  display.println();
-  display.println("192.168.4.1");
-
-  display.display();
-}
-
-// ==================================================
-// WEATHER
+// WEATHER API
 // ==================================================
 
 void getWeatherAndForecast() {
 
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED)
+    return;
 
+  WiFiClient client;
   HTTPClient http;
 
   String url =
@@ -322,41 +183,37 @@ void getWeatherAndForecast() {
     "&appid=" + apiKey +
     "&units=metric";
 
-  WiFiClient client;
-
-http.begin(client, url);
+  http.begin(client, url);
 
   int httpCode = http.GET();
 
-  if (httpCode == 200) {
+  if (httpCode > 0) {
 
     String payload = http.getString();
 
     DynamicJsonDocument doc(4096);
 
-    deserializeJson(doc, payload);
+    DeserializationError error =
+      deserializeJson(doc, payload);
 
-    temperature =
-      doc["main"]["temp"];
+    if (!error) {
 
-    feelsLike =
-      doc["main"]["feels_like"];
+      temperature =
+        doc["main"]["temp"];
 
-    humidity =
-      doc["main"]["humidity"];
+      weatherMain =
+        doc["weather"][0]["main"].as<String>();
 
-    weatherMain =
-      doc["weather"][0]["main"].as<String>();
-
-    weatherDesc =
-      doc["weather"][0]["description"].as<String>();
+      weatherDesc =
+        doc["weather"][0]["description"].as<String>();
+    }
   }
 
   http.end();
 }
 
 // ==================================================
-// DRAW EYES
+// EYES
 // ==================================================
 
 void drawEye(Eye &e) {
@@ -399,18 +256,44 @@ void updateEyes() {
 
   unsigned long now = millis();
 
-  if (now > leftEye.nextBlinkTime) {
+  static unsigned long lastMove = 0;
+
+  if (now - lastMove > 1200) {
+
+    int moveX = random(-6,7);
+    int moveY = random(-4,5);
+
+    leftEye.targetPupilX = moveX;
+    leftEye.targetPupilY = moveY;
+
+    rightEye.targetPupilX = moveX;
+    rightEye.targetPupilY = moveY;
+
+    lastMove = now;
+  }
+
+  static bool blinking = false;
+  static unsigned long blinkStart = 0;
+
+  if (!blinking && now > leftEye.nextBlinkTime) {
+
+    blinking = true;
+
+    blinkStart = now;
 
     leftEye.targetH = 2;
     rightEye.targetH = 2;
+  }
 
-    leftEye.nextBlinkTime =
-      now + random(2000,5000);
-
-  } else {
+  if (blinking && now - blinkStart > 150) {
 
     leftEye.targetH = 36;
     rightEye.targetH = 36;
+
+    blinking = false;
+
+    leftEye.nextBlinkTime =
+      now + random(2000,5000);
   }
 
   leftEye.update();
@@ -426,6 +309,136 @@ void drawEmoPage() {
 }
 
 // ==================================================
+// SLEEP EYES
+// ==================================================
+
+void drawSleepingEyes() {
+
+  // Half closed left eye
+  display.fillRoundRect(
+    20,
+    24,
+    36,
+    12,
+    6,
+    SH110X_WHITE
+  );
+
+  display.fillRect(
+    20,
+    18,
+    36,
+    10,
+    SH110X_BLACK
+  );
+
+  // Half closed right eye
+  display.fillRoundRect(
+    72,
+    24,
+    36,
+    12,
+    6,
+    SH110X_WHITE
+  );
+
+  display.fillRect(
+    72,
+    18,
+    36,
+    10,
+    SH110X_BLACK
+  );
+
+  // Moving Z animation
+  // Animated floating ZZZ
+  int zOffset =
+    (millis() / 300) % 14;
+
+  display.setTextSize(1);
+
+  display.setCursor(
+    58,
+    20 - zOffset
+  );
+  display.print("z");
+
+  display.setCursor(
+    68,
+    14 - zOffset
+  );
+  display.print("Z");
+
+  display.setCursor(
+    80,
+    8 - zOffset
+  );
+  display.print("z");
+}
+
+void playWakeAnimation() {
+
+  // Closed eyes
+  for (int h = 4; h <= 36; h += 4) {
+
+    display.clearDisplay();
+
+    display.fillRoundRect(
+      18,14,36,h,8,SH110X_WHITE
+    );
+
+    display.fillRoundRect(
+      74,14,36,h,8,SH110X_WHITE
+    );
+
+    display.display();
+
+    delay(60);
+  }
+
+  // Look left
+  leftEye.targetPupilX = -6;
+  rightEye.targetPupilX = -6;
+
+  for (int i = 0; i < 10; i++) {
+
+    leftEye.update();
+    rightEye.update();
+
+    display.clearDisplay();
+
+    drawEye(leftEye);
+    drawEye(rightEye);
+
+    display.display();
+
+    delay(20);
+  }
+
+  // Look right
+  leftEye.targetPupilX = 6;
+  rightEye.targetPupilX = 6;
+
+  for (int i = 0; i < 10; i++) {
+
+    leftEye.update();
+    rightEye.update();
+
+    display.clearDisplay();
+
+    drawEye(leftEye);
+    drawEye(rightEye);
+
+    display.display();
+
+    delay(20);
+  }
+
+  // Center
+  leftEye.targetPupilX = 0;
+  rightEye.targetPupilX = 0;
+}
+// ==================================================
 // CLOCK PAGE
 // ==================================================
 
@@ -433,7 +446,8 @@ void drawClock() {
 
   struct tm t;
 
-  if (!getLocalTime(&t)) return;
+  if (!getLocalTime(&t))
+    return;
 
   display.setFont(&FreeSans9pt7b);
 
@@ -467,9 +481,25 @@ void drawClock() {
 
   int x = (128 - w) / 2;
 
-  display.setCursor(x,40);
+  display.setCursor(x,28);
 
   display.print(timeStr);
+
+  display.setFont(NULL);
+
+  char dateStr[20];
+
+  sprintf(
+    dateStr,
+    "%02d/%02d/%04d",
+    t.tm_mday,
+    t.tm_mon + 1,
+    t.tm_year + 1900
+  );
+
+  display.setCursor(30,50);
+
+  display.print(dateStr);
 }
 
 // ==================================================
@@ -478,20 +508,21 @@ void drawClock() {
 
 void drawWeatherPage() {
 
-  // Small font
   display.setFont(&FreeSans9pt7b);
 
-  // City
   display.setCursor(2,12);
+
   display.print(city);
 
-  // Icon
   drawWeatherIcon(weatherMain,96,0);
 
-  // Temperature
   char tempStr[10];
 
-  sprintf(tempStr, "%dC", (int)temperature);
+  sprintf(
+    tempStr,
+    "%dC",
+    (int)temperature
+  );
 
   int16_t x1, y1;
   uint16_t w, h;
@@ -509,23 +540,23 @@ void drawWeatherPage() {
   int x = (128 - w) / 2;
 
   display.setCursor(x,34);
+
   display.print(tempStr);
 
-  // Smaller bottom text
   display.setFont(NULL);
 
-  // Limit long text
   String shortDesc = weatherDesc;
 
   if (shortDesc.length() > 14)
     shortDesc = shortDesc.substring(0,14);
 
   display.setCursor(8,54);
+
   display.print(shortDesc);
 }
 
 // ==================================================
-// BOOT
+// BOOT ANIMATION
 // ==================================================
 
 void playBootAnimation() {
@@ -534,7 +565,12 @@ void playBootAnimation() {
 
     display.clearDisplay();
 
-    display.drawCircle(64,32,r,SH110X_WHITE);
+    display.drawCircle(
+      64,
+      32,
+      r,
+      SH110X_WHITE
+    );
 
     display.display();
 
@@ -553,6 +589,88 @@ void playBootAnimation() {
 }
 
 // ==================================================
+// CONFIG MODE
+// ==================================================
+
+// void handleConfigRoot() {
+
+//   String html =
+//   "<html><body style='background:black;color:white;'>"
+//   "<h2>DeskBuddy Setup</h2>"
+//   "<form action='/save' method='POST'>"
+//   "<input name='ssid' placeholder='WiFi'><br><br>"
+//   "<input name='pass' placeholder='Password'><br><br>"
+//   "<input name='city' placeholder='City'><br><br>"
+//   "<button>Save</button>"
+//   "</form></body></html>";
+
+//   configServer.send(200,"text/html",html);
+// }
+
+// void handleConfigSave() {
+
+//   wifiSsid =
+//     configServer.arg("ssid");
+
+//   wifiPass =
+//     configServer.arg("pass");
+
+//   city =
+//     configServer.arg("city");
+
+//   configServer.send(
+//     200,
+//     "text/html",
+//     "<h2>Saved. Restarting...</h2>"
+//   );
+
+//   delay(2000);
+
+//   ESP.restart();
+// }
+
+// void startConfigPortal() {
+
+//   inConfigMode = true;
+
+//   WiFi.mode(WIFI_AP_STA);
+
+//   WiFi.softAP(
+//     CONFIG_AP_SSID,
+//     CONFIG_AP_PASS
+//   );
+
+//   configServer.on(
+//     "/",
+//     handleConfigRoot
+//   );
+
+//   configServer.on(
+//     "/save",
+//     HTTP_POST,
+//     handleConfigSave
+//   );
+
+//   configServer.begin();
+
+//   display.clearDisplay();
+
+//   display.setCursor(0,10);
+
+//   display.println("CONFIG MODE");
+
+//   display.println();
+
+//   display.println(CONFIG_AP_SSID);
+
+//   display.println();
+
+//   display.println("192.168.4.1");
+
+//   display.display();
+// }
+
+// ==================================================
 // SETUP
 // ==================================================
 
@@ -560,92 +678,174 @@ void setup() {
 
   Serial.begin(115200);
 
-  Wire.begin(SDA_PIN,SCL_PIN);
+  Wire.begin(
+    SDA_PIN,
+    SCL_PIN
+  );
 
-  pinMode(TOUCH_PIN, INPUT_PULLUP);
+  pinMode(
+    TOUCH_PIN,
+    INPUT
+  );
 
-  display.begin(0x3C,true);
+  display.begin(0x3C, true);
 
   display.clearDisplay();
   display.display();
 
-  display.setTextColor(SH110X_WHITE);
+  display.setTextColor(
+    SH110X_WHITE
+  );
 
-  leftEye.init(18,14,36,36);
-  rightEye.init(74,14,36,36);
+  leftEye.init(
+    18,14,36,36
+  );
+
+  rightEye.init(
+    74,14,36,36
+  );
 
   playBootAnimation();
 
-  WiFi.begin(
-    wifiSsid.c_str(),
-    wifiPass.c_str()
-  );
+  // =========================
+  // WiFiManager
+  // =========================
+
+  WiFiManager wm;
 
   display.clearDisplay();
 
   display.setCursor(0,20);
 
-  display.println("Connecting WiFi");
+  display.println("WiFi Setup");
 
   display.display();
 
-  unsigned long startAttempt = millis();
+  bool res = wm.autoConnect(
+    "DeskBuddy-Setup",
+    "12345678"
+  );
 
-  while (
-    WiFi.status() != WL_CONNECTED &&
-    millis() - startAttempt < 15000
-  ) {
-    delay(200);
+  if (!res) {
+
+    display.clearDisplay();
+
+    display.setCursor(0,20);
+
+    display.println("WiFi Failed");
+
+    display.display();
+
+    delay(2000);
+
+    ESP.restart();
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
+  // =========================
+  // Time
+  // =========================
 
-    startConfigPortal();
+  configTime(
+    0,
+    0,
+    ntpServer
+  );
 
-    return;
-  }
-
-  configTime(0,0,ntpServer);
-
-  setenv("TZ", tzString.c_str(), 1);
+  setenv(
+    "TZ",
+    tzString.c_str(),
+    1
+  );
 
   tzset();
+
+  // =========================
+  // Weather
+  // =========================
 
   getWeatherAndForecast();
 
   lastWeatherUpdate = millis();
-}
 
+  lastInteraction = millis();
+
+  display.clearDisplay();
+
+  display.setCursor(0,20);
+
+  display.println("Connected!");
+
+  display.display();
+
+  delay(1000);
+}
 // ==================================================
 // LOOP
 // ==================================================
 
 void loop() {
 
-  if (inConfigMode) {
+  // if (inConfigMode) {
 
-    configServer.handleClient();
+  //   configServer.handleClient();
 
-    return;
-  }
+  //   return;
+  // }
 
   unsigned long now = millis();
 
-  if (now - lastWeatherUpdate > 600000) {
+  // Weather update
+  if (
+    now - lastWeatherUpdate >
+    600000
+  ) {
 
     getWeatherAndForecast();
 
     lastWeatherUpdate = now;
   }
 
-  if (now - lastPageSwitch > PAGE_INTERVAL) {
+  // Touch
+  bool touchState =
+    digitalRead(TOUCH_PIN);
 
-    currentPage++;
+if (
+  touchState == HIGH &&
+  lastTouchState == LOW &&
+  millis() - lastTouchTime > 300
+) {
 
-    if (currentPage > 2)
+  // Was sleeping?
+    if (sleeping) {
+
+      sleeping = false;
+
+      lastInteraction = millis();
+
       currentPage = 0;
 
-    lastPageSwitch = now;
+      playWakeAnimation();
+
+    } else {
+
+      lastInteraction = millis();
+
+      currentPage++;
+
+      if (currentPage > 2)
+        currentPage = 0;
+    }
+
+    lastTouchTime = millis();
+  }
+
+  // Sleep
+  if (
+    millis() - lastInteraction >
+    SLEEP_TIME
+  ) {
+
+    sleeping = true;
   }
 
   display.clearDisplay();
@@ -653,7 +853,12 @@ void loop() {
   switch(currentPage){
 
     case 0:
-      drawEmoPage();
+
+      if (sleeping)
+        drawSleepingEyes();
+      else
+        drawEmoPage();
+
       break;
 
     case 1:
@@ -667,4 +872,3 @@ void loop() {
 
   display.display();
 }
-
